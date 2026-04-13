@@ -3,20 +3,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 from scipy.interpolate import interp1d
+import matplotlib.lines as mlines
 
+# ---------------------- 基础工具函数（保留核心逻辑，无破坏性修改） ----------------------
 def read_tum_trajectory(file_path):
-    """
-    读取 TUM 格式轨迹文件（timestamp tx ty tz qx qy qz qw）
-    返回时间戳（秒），平移向量（N×3），四元数（N×4，顺序 [qx,qy,qz,qw]）
-    """
+    """读取 TUM 格式轨迹文件（timestamp tx ty tz qx qy qz qw）"""
+    if not os.path.exists(file_path):
+        return None, None, None
     data = np.loadtxt(file_path)
     timestamps = data[:, 0]
     positions = data[:, 1:4]
-    quaternions = data[:, 4:8]          # qx, qy, qz, qw
+    quaternions = data[:, 4:8]  # qx, qy, qz, qw
     return timestamps, positions, quaternions
 
 def normalize_quaternions(q):
-    """确保四元数符号一致（相邻帧点积为正），消除符号跳变"""
+    """确保四元数符号一致，消除符号跳变"""
     q_norm = np.copy(q)
     for i in range(1, len(q_norm)):
         if np.dot(q_norm[i-1], q_norm[i]) < 0:
@@ -24,19 +25,11 @@ def normalize_quaternions(q):
     return q_norm
 
 def slerp_quat(q0, q1, t):
-    """
-    球面线性插值 (SLERP) 两个四元数
-    q0, q1: 四元数数组 (x,y,z,w)
-    t: 插值因子 [0,1]
-    返回插值后的四元数 (x,y,z,w)
-    """
-    # 点积
+    """球面线性插值 (SLERP) 两个四元数"""
     dot = np.dot(q0, q1)
-    # 取最短路径
     if dot < 0:
         q1 = -q1
         dot = -dot
-    # 数值稳定处理：当夹角很小时用线性插值
     if dot > 0.9995:
         q = q0 + t * (q1 - q0)
         q /= np.linalg.norm(q)
@@ -50,13 +43,8 @@ def slerp_quat(q0, q1, t):
     return q
 
 def interpolate_quaternions(t_src, q_src, t_target):
-    """
-    将源四元数序列插值到目标时间戳上
-    使用 SLERP（球面线性插值）保证旋转插值的正确性
-    """
-    # 确保源四元数符号一致
+    """将源四元数序列插值到目标时间戳上"""
     q_src = normalize_quaternions(q_src)
-    
     q_interp = []
     for t in t_target:
         if t <= t_src[0]:
@@ -67,38 +55,33 @@ def interpolate_quaternions(t_src, q_src, t_target):
             idx = np.searchsorted(t_src, t) - 1
             t0, t1 = t_src[idx], t_src[idx+1]
             alpha = (t - t0) / (t1 - t0)
-            # SLERP 插值
             q_slerp = slerp_quat(q_src[idx], q_src[idx+1], alpha)
             q_interp.append(q_slerp)
     return np.array(q_interp)
 
 def compute_angular_velocity(timestamps, quaternions, min_dt=1e-6):
-    """
-    计算角速度（度/秒），使用中心差分提高精度
-    """
+    """计算角速度（度/秒），中心差分保证精度"""
     quaternions = normalize_quaternions(quaternions)
-    
     n = len(timestamps)
     time_mids = []
     ang_vels = []
     
-    # 中心差分：从索引 1 开始，到 n-2 结束
+    # 中心差分（主体数据）
     for i in range(1, n - 1):
         dt = timestamps[i+1] - timestamps[i-1]
         if dt <= 2 * min_dt:
             continue
-        
         q_prev = R.from_quat(quaternions[i-1])
         q_curr = R.from_quat(quaternions[i+1])
         rel = q_prev.inv() * q_curr
         angle_rad = rel.magnitude()
         ang_vel_deg = np.degrees(angle_rad) / dt
-        time_mids.append(timestamps[i])  # 使用中间时刻
+        time_mids.append(timestamps[i])
         ang_vels.append(ang_vel_deg)
     
-    # 处理首尾点（使用前向/后向差分）
+    # 首尾点前向/后向差分补全
     if n >= 2:
-        # 首点：前向差分
+        # 首点
         dt = timestamps[1] - timestamps[0]
         if dt > min_dt:
             q0 = R.from_quat(quaternions[0])
@@ -108,8 +91,7 @@ def compute_angular_velocity(timestamps, quaternions, min_dt=1e-6):
             ang_vel_deg = np.degrees(angle_rad) / dt
             time_mids.insert(0, (timestamps[0] + timestamps[1]) / 2.0)
             ang_vels.insert(0, ang_vel_deg)
-        
-        # 尾点：后向差分
+        # 尾点
         dt = timestamps[-1] - timestamps[-2]
         if dt > min_dt:
             q_prev = R.from_quat(quaternions[-2])
@@ -119,106 +101,259 @@ def compute_angular_velocity(timestamps, quaternions, min_dt=1e-6):
             ang_vel_deg = np.degrees(angle_rad) / dt
             time_mids.append((timestamps[-2] + timestamps[-1]) / 2.0)
             ang_vels.append(ang_vel_deg)
-    
     return np.array(time_mids), np.array(ang_vels)
 
-def plot_angular_velocity_comparison(t_common, v1, v2, mean_diff, rmse, name1='Traj 1', name2='Traj 2'):
-    """绘制角速度曲线和散点图"""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-    
-    ax1.plot(t_common, v1, 'b-', label=name1, linewidth=1.5)
-    ax1.plot(t_common, v2, 'r-', label=name2, linewidth=1.5)
-    ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Angular Velocity (deg/s)')
-    ax1.legend()
-    ax1.grid(True)
-    ax1.set_title('Angular Velocity over Time')
-    
-    ax2.scatter(v1, v2, alpha=0.6, s=10)
-    ax2.plot([min(v1.min(), v2.min()), max(v1.max(), v2.max())],
-             [min(v1.min(), v2.min()), max(v1.max(), v2.max())],
-             'k--', alpha=0.5, label='Identity')
-    ax2.set_xlabel(f'{name1} Angular Velocity (deg/s)')
-    ax2.set_ylabel(f'{name2} Angular Velocity (deg/s)')
-    ax2.set_title(f'Scatter Plot (Mean Diff = {mean_diff:.2f}, RMSE = {rmse:.2f} deg/s)')
-    ax2.grid(True)
-    ax2.legend()
-    plt.tight_layout()
-    plt.show()
+# ---------------------- 新增核心函数：统一时间轴处理 ----------------------
+def get_trajectory_time_range(file_path):
+    """获取单个轨迹文件的时间起止范围，文件不存在返回None"""
+    t, _, _ = read_tum_trajectory(file_path)
+    if t is None or len(t) < 2:
+        return None
+    return t[0], t[-1]
 
-def main(file1, file2):
+def get_angular_velocity_error_on_unified_t(gt_file, est_file, t_unified):
+    """
+    计算角速度误差，并插值到统一时间轴上
+    输入：真值文件、估计文件、统一时间戳数组
+    输出：插值到统一时间轴的误差数组（est - gt），失败返回None
+    """
     # 读取轨迹
-    t1, _, q1 = read_tum_trajectory(file1)
-    t2, _, q2 = read_tum_trajectory(file2)
+    t_gt, _, q_gt = read_tum_trajectory(gt_file)
+    t_est, _, q_est = read_tum_trajectory(est_file)
+    if t_gt is None or t_est is None:
+        return None
+    
+    # 裁剪到统一时间范围（避免外插）
+    t_min, t_max = t_unified[0], t_unified[-1]
+    mask_gt = (t_gt >= t_min) & (t_gt <= t_max)
+    mask_est = (t_est >= t_min) & (t_est <= t_max)
+    if np.sum(mask_gt) < 2 or np.sum(mask_est) < 2:
+        return None
+    
+    t_gt_crop, q_gt_crop = t_gt[mask_gt], q_gt[mask_gt]
+    t_est_crop, q_est_crop = t_est[mask_est], q_est[mask_est]
+    
+    # 插值估计四元数到真值裁剪后的时间轴
+    q_est_interp = interpolate_quaternions(t_est_crop, q_est_crop, t_gt_crop)
+    
+    # 计算角速度
+    t_mid_gt, v_gt = compute_angular_velocity(t_gt_crop, q_gt_crop)
+    t_mid_est, v_est = compute_angular_velocity(t_gt_crop, q_est_interp)
+    
+    # 对齐角速度的时间轴
+    min_len = min(len(v_gt), len(v_est))
+    t_mid = t_mid_gt[:min_len]
+    v_gt = v_gt[:min_len]
+    v_est = v_est[:min_len]
+    
+    # 计算原始误差
+    error_raw = v_est - v_gt
+    
+    # 将误差插值到全局统一时间轴
+    if len(t_mid) < 2:
+        return None
+    interp_func = interp1d(
+        t_mid, error_raw, kind='linear', 
+        bounds_error=False, fill_value=(error_raw[0], error_raw[-1])
+    )
+    error_unified = interp_func(t_unified)
+    
+    return error_unified
 
+# ---------------------- 主函数：按序列统一时间轴绘图 ----------------------
+def main():
+    # ====================== 字体与样式配置 ======================
+    # 设置全局字体为 Times New Roman
+    plt.rcParams['font.family'] = 'serif'
+    plt.rcParams['font.serif'] = ['Times New Roman']
+    # 解决负号显示问题（可选，视系统而定，通常 Times New Roman 支持良好）
+    plt.rcParams['axes.unicode_minus'] = False 
+
+    # 基础配置
+    gt_base_path = "./bell412_gt/bell412_{}_gt.txt"
+    sequences = ['3', '4', '5']  # 待处理序列
     
-    # 确定共同时间范围
-    t_start = max(t1[0], t2[0])
-    t_end = min(t1[-1], t2[-1])
+    # 算法配置：(算法名, 路径模板, 颜色, 线型) 固定配色/线型，保证全图统一
+    alg_configs = [
+        ("ORB-SLAM3", "./orbslam3/orbslam_{}{}.txt", "#2ca02c", "-"),    # 绿色实线
+        ("DPVO",      "./dpvo/dpvo_{}{}.txt",       "#1f77b4", "--"),   # 蓝色虚线
+        ("ROVO",      "./rovo/rovo_{}{}.txt",       "#ff7f0e", "-."),   # 橙色点划线
+    ]
     
-    if t_start >= t_end:
-        print("两条轨迹在时间上没有重叠区域，无法比较。")
+    # 分组配置：(分组名, 文件后缀)
+    group_configs = [
+        ("Bell412", ""),
+        ("3x Scaled Bell412", "_scale")
+    ]
+    
+    # 预存储每个序列、每个分组的统一时间轴 + 所有算法误差数据
+    # 结构: seq_data[seq][group_name] = {"t_unified": ..., "error_data": {...}}
+    seq_data = {}
+
+    # ====================== 第一步：按序列和分组分别计算统一时间轴 ======================
+    for seq in sequences:
+        print(f"\n===== 处理序列 {seq} =====")
+        seq_data[seq] = {} # 初始化当前序列的数据容器
+        
+        gt_file = gt_base_path.format(seq)
+        
+        # 遍历每个分组，独立计算时间轴和误差
+        for group_name, group_suffix in group_configs:
+            print(f"  --- 处理分组: {group_name} ---")
+            
+            # 1. 收集该序列、该分组所有相关文件路径
+            seq_group_files = []
+            # 加入真值文件
+            seq_group_files.append(gt_file)
+            # 加入当前分组下所有算法的文件
+            for _, alg_path_template, _, _ in alg_configs:
+                est_file = alg_path_template.format(seq, group_suffix)
+                # 兼容dpvo命名问题
+                seq_group_files.append(est_file)
+            
+            # 2. 读取所有有效文件的时间范围
+            time_ranges = []
+            for file in seq_group_files:
+                tr = get_trajectory_time_range(file)
+                if tr is not None:
+                    time_ranges.append(tr)
+                    # print(f"    有效文件: {os.path.basename(file)} | 时间范围: {tr[0]:.2f} ~ {tr[1]:.2f} s")
+                else:
+                    print(f"    无效文件: {os.path.basename(file)} | 跳过")
+            
+            if len(time_ranges) == 0:
+                print(f"  序列 {seq} - 分组 {group_name} 无有效文件，跳过")
+                continue
+            
+            # 3. 计算该分组全局统一时间范围
+            t_unified_start = max([tr[0] for tr in time_ranges])
+            t_unified_end = min([tr[1] for tr in time_ranges])
+            
+            if t_unified_start >= t_unified_end:
+                print(f"  序列 {seq} - 分组 {group_name} 无公共时间区间，跳过")
+                continue
+            
+            print(f"  序列 {seq} - 分组 {group_name} 统一时间范围: {t_unified_start:.2f} ~ {t_unified_end:.2f} s")
+            
+            # 4. 生成统一时间轴：以真值的时间戳为基准，裁剪到统一时间范围
+            t_gt_full, _, _ = read_tum_trajectory(gt_file)
+            if t_gt_full is None:
+                print(f"  序列 {seq} - 分组 {group_name} 真值文件读取失败，跳过")
+                continue
+                
+            mask_unified = (t_gt_full >= t_unified_start) & (t_gt_full <= t_unified_end)
+            t_unified = t_gt_full[mask_unified]
+            
+            if len(t_unified) < 2:
+                print(f"  序列 {seq} - 分组 {group_name} 统一时间轴点数不足，跳过")
+                continue
+            print(f"  序列 {seq} - 分组 {group_name} 统一时间戳点数: {len(t_unified)}")
+            
+            # 5. 计算该分组下所有算法在统一时间轴上的误差
+            group_error_data = {}
+            for alg_name, alg_path_template, color, linestyle in alg_configs:
+                est_file = alg_path_template.format(seq, group_suffix)
+                
+                error = get_angular_velocity_error_on_unified_t(gt_file, est_file, t_unified)
+                if error is not None:
+                    group_error_data[alg_name] = error
+                    print(f"    成功计算: {alg_name}")
+                else:
+                    print(f"    计算失败: {alg_name} | 跳过")
+            
+            # 保存该序列、该分组的数据
+            seq_data[seq][group_name] = {
+                "t_unified": t_unified,
+                "error_data": group_error_data
+            }
+
+    # ====================== 第二步：统一绘图 ======================
+    if len(seq_data) == 0:
+        print("无有效序列数据，无法绘图")
         return
     
-    # 裁剪到共同时间范围
-    mask1 = (t1 >= t_start) & (t1 <= t_end)
-    mask2 = (t2 >= t_start) & (t2 <= t_end)
-    t1_crop, q1_crop = t1[mask1], q1[mask1]
-    t2_crop, q2_crop = t2[mask2], q2[mask2]
+    # 创建画布：2行（分组） x 3列（序列）
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10), dpi=100)
     
-    # 以轨迹 1 的时间戳为基准，将轨迹 2 插值到轨迹 1 的时间轴
-    q2_interp = interpolate_quaternions(t2_crop, q2_crop, t1_crop)
-    
-    # 在相同时间戳上计算角速度（频率一致）
-    t_mid, v1 = compute_angular_velocity(t1_crop, q1_crop)
-    _, v2 = compute_angular_velocity(t1_crop, q2_interp)  # 使用插值后的四元数
-    
-    # 确保两组角速度序列长度一致
-    min_len = min(len(v1), len(v2))
-    t_mid = t_mid[:min_len]
-    v1 = v1[:min_len]
-    v2 = v2[:min_len]
-    
-    # 计算差异指标
-    diff = np.abs(v1 - v2)
-    mean_diff = np.mean(diff)
-    rmse = np.sqrt(np.mean((v1 - v2)**2))
-    
-    print(f"重叠时间区间：{t_start:.2f} ~ {t_end:.2f} s")
-    print(f"有效数据点数：{len(t_mid)}")
-    print(f"角速度差异均值：{mean_diff:.2f} deg/s")
-    print(f"均方根误差 (RMSE): {rmse:.2f} deg/s")
-    print(f"最大差异：{np.max(diff):.2f} deg/s")
-    
-    # 提取文件名用于图例
-    label1 = os.path.basename(file1)
-    label2 = os.path.basename(file2)
-    
-    plot_angular_velocity_comparison(t_mid, v1, v2, mean_diff, rmse, label1, label2)
+    # 遍历分组和序列绘图
+    for row_idx, (group_name, _) in enumerate(group_configs):
+        for col_idx, seq in enumerate(sequences):
+            ax = axes[row_idx, col_idx]
+            
+            # 检查该序列该分组是否有数据
+            if seq not in seq_data or group_name not in seq_data[seq]:
+                ax.text(0.5, 0.5, "No Valid Data", ha='center', va='center', transform=ax.transAxes, fontname='Times New Roman')
+                ax.set_title(f"{group_name}_{seq}", fontname='Times New Roman', fontweight='bold')
+                ax.grid(True, alpha=0.3)
+                continue
+            
+            # 获取该分组特有的统一时间轴和误差数据
+            t_unified = seq_data[seq][group_name]["t_unified"]
+            error_data = seq_data[seq][group_name]["error_data"]
+            
+            # 用于存放当前子图的图例句柄和标签
+            current_legend_handles = []
+            current_legend_labels = []
+            
+            # 绘制每个算法的误差曲线
+            for alg_name, _, color, linestyle in alg_configs:
+                if alg_name not in error_data:
+                    # 如果数据不存在，添加一个空的占位符到图例中显示 failed
+                    fake_line = mlines.Line2D([], [], color='gray', linestyle='-', label=f"{alg_name}: failed")
+                    current_legend_handles.append(fake_line)
+                    current_legend_labels.append(f"{alg_name}: failed")
+                    continue
+                
+                error = error_data[alg_name]
+                line, = ax.plot(
+                    t_unified, error, 
+                    color=color, linestyle=linestyle, 
+                    linewidth=1.2, alpha=0.85
+                )
+                
+                # 计算均值
+                mean_err = np.mean(np.abs(error))
+                
+                # 将均值添加到图例标签中
+                legend_label = f"{alg_name}: {mean_err:.2f}"
+                current_legend_handles.append(line)
+                current_legend_labels.append(legend_label)
+
+            # 子图格式设置
+            ax.set_title(f"{group_name}_{seq}", fontsize=12, fontweight='bold', fontname='Times New Roman')
+            ax.set_xlabel("Time (s)", fontsize=10, fontname='Times New Roman', fontweight='bold')
+            ax.set_ylabel("Angular Velocity Error (deg/s)", fontsize=10, fontname='Times New Roman',fontweight='bold')
+            ax.grid(True, alpha=0.3, linestyle='--')
+            
+            # 在每个子图中添加独立图例
+            if current_legend_handles:
+                leg = ax.legend(
+                    current_legend_handles, 
+                    current_legend_labels,
+                    loc='upper right',
+                    fontsize=9,
+                    frameon=True,
+                    shadow=False,
+                    borderpad=0.5,
+                    labelspacing=0.3,
+                    handlelength=1.5,
+                    prop={'family': 'Times New Roman'} # 确保图例字体也是 Times New Roman
+                )
+
+    # 全局格式调整
+    plt.tight_layout(h_pad=2.0) 
+
+    # 修改点2: 保存高质量PNG图像
+    output_filename = "angular_velocity_error_comparison.png"
+    plt.savefig(
+        output_filename, 
+        dpi=300,          # 高分辨率 (300 DPI 是出版级标准，也可设为 600)
+        bbox_inches='tight', # 自动调整边界，防止标签被切掉
+        pad_inches=0.5    # 增加一点内边距
+    )
+    print(f"图像已保存至: {output_filename}")
+
+    plt.show()
 
 if __name__ == "__main__":
-    main("./bell412_gt/bell412_3_gt.txt", "./rovo/rovo_3.txt")
-    main("./bell412_gt/bell412_4_gt.txt", "./rovo/rovo_4.txt")
-    main("./bell412_gt/bell412_5_gt.txt", "./rovo/rovo_5.txt")
-    main("./bell412_gt/bell412_3_gt.txt", "./rovo/rovo_3_scale.txt")
-    main("./bell412_gt/bell412_4_gt.txt", "./rovo/rovo_4_scale.txt")
-    main("./bell412_gt/bell412_5_gt.txt", "./rovo/rovo_5_scale.txt")
-    
-    main("./bell412_gt/bell412_3_gt.txt", "./dpvo/dpvo_3.txt")
-    main("./bell412_gt/bell412_4_gt.txt", "./dpvo/dpvo_4.txt")
-    main("./bell412_gt/bell412_5_gt.txt", "./dpvo/dpvo_5.txt")
-    main("./bell412_gt/bell412_3_gt.txt", "./dpvo/dpvo_3_scale.txt")
-    main("./bell412_gt/bell412_4_gt.txt", "./dpvo/dpvo_4_scale.txt")
-    main("./bell412_gt/bell412_5_gt.txt", "./dpvo/dpvo_5_scale.txt")
-
-    main("./bell412_gt/bell412_3_gt.txt", "./orbslam3/orbslam_3.txt")
-    main("./bell412_gt/bell412_4_gt.txt", "./orbslam3/orbslam_4.txt")
-    main("./bell412_gt/bell412_5_gt.txt", "./orbslam3/orbslam_5.txt")
-    main("./bell412_gt/bell412_3_gt.txt", "./orbslam3/orbslam_3_scale.txt")
-    main("./bell412_gt/bell412_4_gt.txt", "./orbslam3/orbslam_4_scale.txt")
-    main("./bell412_gt/bell412_5_gt.txt", "./orbslam3/orbslam_5_scale.txt")
-
-
-    
-   
-    
+    main()
