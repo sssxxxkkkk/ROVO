@@ -15,8 +15,8 @@ The default run evaluates ORB-SLAM3, DPVO, and ROVO (Hybrid Join) and writes `me
 The evaluator associates poses by nearest timestamp within the tolerance, following evo's timestamp association convention. Eligible pairs have adjacent reference frames and two distinct associated poses in temporal order. ROVO pairs also require a shared tracking segment. The relative rotation error (RRE) is the angle in degrees of the reference relative rotation inverse composed with the estimated relative rotation. RMSE is the root mean square of those angles. [evo](https://github.com/MichaelGrupp/evo)
 
 - Bell412 comparison and ablation scores use the intersection of eligible reference pairs for the methods in each run.
-- VPAIR comparison scores include each method?s own pairs (`own`), the intersection across all three methods (`shared`), and the intersection specific to DPVO and ROVO (`shared_dpvo_rovo`). Coverage counts distinct matched query frames. VPAIR ablation scores use the same 2,667 pairs for all four variants.
-- The released Bell412-5 triple-focal-length Hybrid Join trajectory is `rovo/rovo_5_scale_hybridjoin_rerun.txt`. Its 280 shared comparison pairs give 0.779609? RMSE. The manuscript?s main comparison table reports 0.789?, and its ablation reports 0.7796?.
+- VPAIR comparison scores include each method’s own pairs (`own`), the intersection across all three methods (`shared`), and the intersection specific to DPVO and ROVO (`shared_dpvo_rovo`). Coverage counts distinct matched query frames. VPAIR ablation scores use the same 2,667 pairs for all four variants.
+- The released Bell412-5 triple-focal-length Hybrid Join trajectory is `rovo/rovo_5_scale_hybridjoin_rerun.txt`. Its 280 shared comparison pairs give 0.779609° RMSE. The manuscript’s ablation reports 0.7796°.
 
 ## Inputs and sources
 

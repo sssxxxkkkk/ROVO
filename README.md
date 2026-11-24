@@ -14,13 +14,13 @@ ROVO estimates a trajectory of camera orientations from calibrated monocular aer
 
 ## Flight experiments
 
-The benchmark covers MUN-FRL Bell412 flights 3, 4, and 5 at the original focal length and after reprojection to three times the focal length, plus the 2,706 released VPAIR query images. We compare ROVO with ORB-SLAM3 and DPVO and provide trajectories for four ROVO ablation variants. [Flight metrics](results/flight_metrics.csv) ? [Ablation metrics](results/ablation_metrics.csv)
+The benchmark covers MUN-FRL Bell412 flights 3, 4, and 5 at the original focal length and after reprojection to three times the focal length, plus the 2,706 released VPAIR query images. We compare ROVO with ORB-SLAM3 and DPVO and provide trajectories for four ROVO ablation variants. [Flight metrics](results/flight_metrics.csv) · [Ablation metrics](results/ablation_metrics.csv)
 
 ![Relative rotation error over time for ORB-SLAM3, DPVO, and ROVO across all seven flight conditions](figures/flight-rre.png)
 
-*The Bell412 panels use frame pairs shared by all three methods. The VPAIR panel uses each method?s valid adjacent query pairs. Shading indicates missing ORB-SLAM3 poses.*
+*The Bell412 panels use frame pairs shared by all three methods. The VPAIR panel uses each method’s valid adjacent query pairs. Shading indicates missing ORB-SLAM3 poses.*
 
-On VPAIR, ROVO estimated 2,681 of 2,706 orientations (99.1% coverage) and achieved 2.631? RMSE on the 216 adjacent pairs shared by all three methods. The released Bell412-5 triple-focal-length Hybrid Join rerun yields 0.780? on the shared comparison pairs. The manuscript?s main comparison table reports 0.789? for this condition.
+On VPAIR, ROVO estimated 2,681 of 2,706 orientations (99.1% coverage) and achieved 2.631° RMSE on the 216 adjacent pairs shared by all three methods. The released Bell412-5 triple-focal-length Hybrid Join rerun yields 0.780° on the shared comparison pairs.
 
 ## Reproduce the evaluation
 
