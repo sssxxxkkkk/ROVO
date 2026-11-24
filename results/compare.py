@@ -1,359 +1,322 @@
-import os
-import numpy as np
+"""Compare Bell412 and VPAIR relative rotation errors."""
+import argparse
+import csv
+from pathlib import Path
+
 import matplotlib.pyplot as plt
+import numpy as np
 from scipy.spatial.transform import Rotation as R
-from scipy.interpolate import interp1d
-import matplotlib.lines as mlines
 
-# ---------------------- 基础工具函数（保留核心逻辑，无破坏性修改） ----------------------
-def read_tum_trajectory(file_path):
-    """读取 TUM 格式轨迹文件（timestamp tx ty tz qx qy qz qw）"""
-    if not os.path.exists(file_path):
-        return None, None, None
-    data = np.loadtxt(file_path)
-    timestamps = data[:, 0]
-    positions = data[:, 1:4]
-    quaternions = data[:, 4:8]  # qx, qy, qz, qw
-    return timestamps, positions, quaternions
 
-def normalize_quaternions(q):
-    """确保四元数符号一致，消除符号跳变"""
-    q_norm = np.copy(q)
-    for i in range(1, len(q_norm)):
-        if np.dot(q_norm[i-1], q_norm[i]) < 0:
-            q_norm[i] = -q_norm[i]
-    return q_norm
+RESULTS_DIR = Path(__file__).resolve().parent
+SEQUENCES = ("3", "4", "5")
+GROUPS = (("Bell412", ""), ("3x Scaled Bell412", "_scale"))
+HYBRID_JOIN_METHOD = (
+    "ROVO (Hybrid Join)", "rovo", "rovo_{sequence}{suffix}_hybridjoin.txt",
+    "vpair_hybridjoin.txt", "#c43c39", "-",
+)
+BASELINE_METHODS = (
+    ("ORB-SLAM3", "orbslam3", "orbslam_{sequence}{suffix}.txt", "vpair.txt",
+     "#2a9d8f", "-"),
+    ("DPVO", "dpvo", "dpvo_{sequence}{suffix}.txt", "vpair.txt",
+     "#2878b5", "--"),
+)
+ROVO_ABLATION_METHODS = (
+    ("ROVO (5-point)", "rovo", "rovo_{sequence}{suffix}_fivepoint.txt",
+     "vpair_fivepoint.txt", "#e07a28", "-."),
+    ("ROVO (Eigensolver)", "rovo", "rovo_{sequence}{suffix}_eigensolver.txt",
+     "vpair_eigensolver.txt", "#8e5ea2", ":"),
+    HYBRID_JOIN_METHOD,
+)
+METHODS = BASELINE_METHODS + (HYBRID_JOIN_METHOD,)
+OVERWRITE_METHOD = (
+    "ROVO (Hybrid Join Overwrite)", "rovo", "rovo_{sequence}{suffix}_hybridjoin_overwrite.txt",
+    "vpair_hybridjoin_overwrite.txt", "#4b6334", "--",
+)
+MAX_TIME_DIFF = 0.05
+OUTPUT_DIR = RESULTS_DIR / "rotation_evaluation" / "curves"
 
-def slerp_quat(q0, q1, t):
-    """球面线性插值 (SLERP) 两个四元数"""
-    dot = np.dot(q0, q1)
-    if dot < 0:
-        q1 = -q1
-        dot = -dot
-    if dot > 0.9995:
-        q = q0 + t * (q1 - q0)
-        q /= np.linalg.norm(q)
-        return q
-    theta = np.arccos(dot)
-    sin_theta = np.sin(theta)
-    coeff0 = np.sin((1 - t) * theta) / sin_theta
-    coeff1 = np.sin(t * theta) / sin_theta
-    q = coeff0 * q0 + coeff1 * q1
-    q /= np.linalg.norm(q)
-    return q
 
-def interpolate_quaternions(t_src, q_src, t_target):
-    """将源四元数序列插值到目标时间戳上"""
-    q_src = normalize_quaternions(q_src)
-    q_interp = []
-    for t in t_target:
-        if t <= t_src[0]:
-            q_interp.append(q_src[0])
-        elif t >= t_src[-1]:
-            q_interp.append(q_src[-1])
-        else:
-            idx = np.searchsorted(t_src, t) - 1
-            t0, t1 = t_src[idx], t_src[idx+1]
-            alpha = (t - t0) / (t1 - t0)
-            q_slerp = slerp_quat(q_src[idx], q_src[idx+1], alpha)
-            q_interp.append(q_slerp)
-    return np.array(q_interp)
+def _load_tum(file_path):
+    path = Path(file_path)
+    data = np.loadtxt(path, comments="#", ndmin=2)
+    if data.size == 0 or data.shape[1] != 8 or not np.all(np.isfinite(data)):
+        raise ValueError(f"{path}: expected finite timestamp tx ty tz qx qy qz qw rows")
+    quaternion_norms = np.linalg.norm(data[:, 4:8], axis=1)
+    if np.any(quaternion_norms < 1e-12):
+        raise ValueError(f"{path}: zero quaternion")
+    data[:, 4:8] /= quaternion_norms[:, None]
+    return {"t": data[:, 0], "q": data[:, 4:8]}
 
-def compute_angular_velocity(timestamps, quaternions, min_dt=1e-6):
-    """计算角速度（度/秒），中心差分保证精度"""
-    quaternions = normalize_quaternions(quaternions)
-    n = len(timestamps)
-    time_mids = []
-    ang_vels = []
-    
-    # 中心差分（主体数据）
-    for i in range(1, n - 1):
-        dt = timestamps[i+1] - timestamps[i-1]
-        if dt <= 2 * min_dt:
-            continue
-        q_prev = R.from_quat(quaternions[i-1])
-        q_curr = R.from_quat(quaternions[i+1])
-        rel = q_prev.inv() * q_curr
-        angle_rad = rel.magnitude()
-        ang_vel_deg = np.degrees(angle_rad) / dt
-        time_mids.append(timestamps[i])
-        ang_vels.append(ang_vel_deg)
-    
-    # 首尾点前向/后向差分补全
-    if n >= 2:
-        # 首点
-        dt = timestamps[1] - timestamps[0]
-        if dt > min_dt:
-            q0 = R.from_quat(quaternions[0])
-            q1 = R.from_quat(quaternions[1])
-            rel = q0.inv() * q1
-            angle_rad = rel.magnitude()
-            ang_vel_deg = np.degrees(angle_rad) / dt
-            time_mids.insert(0, (timestamps[0] + timestamps[1]) / 2.0)
-            ang_vels.insert(0, ang_vel_deg)
-        # 尾点
-        dt = timestamps[-1] - timestamps[-2]
-        if dt > min_dt:
-            q_prev = R.from_quat(quaternions[-2])
-            q_curr = R.from_quat(quaternions[-1])
-            rel = q_prev.inv() * q_curr
-            angle_rad = rel.magnitude()
-            ang_vel_deg = np.degrees(angle_rad) / dt
-            time_mids.append((timestamps[-2] + timestamps[-1]) / 2.0)
-            ang_vels.append(ang_vel_deg)
-    return np.array(time_mids), np.array(ang_vels)
 
-# ---------------------- 新增核心函数：统一时间轴处理 ----------------------
-def get_trajectory_time_range(file_path):
-    """获取单个轨迹文件的时间起止范围，文件不存在返回None"""
-    t, _, _ = read_tum_trajectory(file_path)
-    if t is None or len(t) < 2:
-        return None
-    return t[0], t[-1]
+def associate_timestamps(reference_times, estimate_times, max_time_diff=MAX_TIME_DIFF):
+    """Match the shorter trajectory to the longer one as in evo.core.sync."""
+    reference = np.asarray(reference_times, dtype=float)
+    estimate = np.asarray(estimate_times, dtype=float)
+    if not np.isfinite(max_time_diff) or max_time_diff < 0:
+        raise ValueError("max_time_diff must be finite and nonnegative")
+    reference_is_shorter = len(reference) < len(estimate)
+    shorter, longer = (reference, estimate) if reference_is_shorter else (estimate, reference)
+    short_ids, long_ids = [], []
+    for i, stamp in enumerate(shorter):
+        differences = np.abs(longer - stamp)
+        j = int(np.argmin(differences))
+        if differences[j] <= max_time_diff:
+            short_ids.append(i)
+            long_ids.append(j)
+    matched = np.asarray(short_ids, dtype=int), np.asarray(long_ids, dtype=int)
+    return matched if reference_is_shorter else matched[::-1]
 
-def get_angular_velocity_error_on_unified_t(gt_file, est_file, t_unified):
-    """
-    计算角速度误差，并插值到统一时间轴上
-    输入：真值文件、估计文件、统一时间戳数组
-    输出：插值到统一时间轴的误差数组（est - gt），失败返回None
-    """
-    # 读取轨迹
-    t_gt, _, q_gt = read_tum_trajectory(gt_file)
-    t_est, _, q_est = read_tum_trajectory(est_file)
-    if t_gt is None or t_est is None:
-        return None
-    
-    # 裁剪到统一时间范围（避免外插）
-    t_min, t_max = t_unified[0], t_unified[-1]
-    mask_gt = (t_gt >= t_min) & (t_gt <= t_max)
-    mask_est = (t_est >= t_min) & (t_est <= t_max)
-    if np.sum(mask_gt) < 2 or np.sum(mask_est) < 2:
-        return None
-    
-    t_gt_crop, q_gt_crop = t_gt[mask_gt], q_gt[mask_gt]
-    t_est_crop, q_est_crop = t_est[mask_est], q_est[mask_est]
-    
-    # 插值估计四元数到真值裁剪后的时间轴
-    q_est_interp = interpolate_quaternions(t_est_crop, q_est_crop, t_gt_crop)
-    
-    # 计算角速度
-    t_mid_gt, v_gt = compute_angular_velocity(t_gt_crop, q_gt_crop)
-    t_mid_est, v_est = compute_angular_velocity(t_gt_crop, q_est_interp)
-    
-    # 对齐角速度的时间轴
-    min_len = min(len(v_gt), len(v_est))
-    t_mid = t_mid_gt[:min_len]
-    v_gt = v_gt[:min_len]
-    v_est = v_est[:min_len]
-    
-    # 计算原始误差
-    error_raw = v_est - v_gt
-    
-    # 将误差插值到全局统一时间轴
-    if len(t_mid) < 2:
-        return None
-    interp_func = interp1d(
-        t_mid, error_raw, kind='linear', 
-        bounds_error=False, fill_value=(error_raw[0], error_raw[-1])
-    )
-    error_unified = interp_func(t_unified)
-    
-    return error_unified
 
-# ---------------------- 主函数：按序列统一时间轴绘图 ----------------------
-def main():
-    # ====================== 字体与样式配置 ======================
-    # 设置全局字体为 Times New Roman
-    plt.rcParams['font.family'] = 'serif'
-    plt.rcParams['font.serif'] = ['Times New Roman']
-    # 解决负号显示问题（可选，视系统而定，通常 Times New Roman 支持良好）
-    plt.rcParams['axes.unicode_minus'] = False 
+def _pair_errors(reference, estimate, ref_start, ref_end, est_start, est_end):
+    ref_delta = R.from_quat(reference["q"][ref_start]).inv() * R.from_quat(reference["q"][ref_end])
+    est_delta = R.from_quat(estimate["q"][est_start]).inv() * R.from_quat(estimate["q"][est_end])
+    angles = np.degrees((ref_delta.inv() * est_delta).magnitude())
+    return {"rre_deg": angles, "rmse_deg": float(np.sqrt(np.mean(angles ** 2)))}
 
-    # 基础配置
-    gt_base_path = "./bell412_gt/bell412_{}_gt.txt"
-    sequences = ['3', '4', '5']  # 待处理序列
-    
-    # 算法配置：(算法名, 路径模板, 颜色, 线型) 固定配色/线型，保证全图统一
-    alg_configs = [
-        ("ORB-SLAM3", "./orbslam3/orbslam_{}{}.txt", "#2ca02c", "-"),    # 绿色实线
-        ("DPVO",      "./dpvo/dpvo_{}{}.txt",       "#1f77b4", "--"),   # 蓝色虚线
-        ("ROVO",      "./rovo/rovo_{}{}.txt",       "#ff7f0e", "-."),   # 橙色点划线
-    ]
-    
-    # 分组配置：(分组名, 文件后缀)
-    group_configs = [
-        ("Bell412", ""),
-        ("3x Scaled Bell412", "_scale")
-    ]
-    
-    # 预存储每个序列、每个分组的统一时间轴 + 所有算法误差数据
-    # 结构: seq_data[seq][group_name] = {"t_unified": ..., "error_data": {...}}
-    seq_data = {}
 
-    # ====================== 第一步：按序列和分组分别计算统一时间轴 ======================
-    for seq in sequences:
-        print(f"\n===== 处理序列 {seq} =====")
-        seq_data[seq] = {} # 初始化当前序列的数据容器
-        
-        gt_file = gt_base_path.format(seq)
-        
-        # 遍历每个分组，独立计算时间轴和误差
-        for group_name, group_suffix in group_configs:
-            print(f"  --- 处理分组: {group_name} ---")
-            
-            # 1. 收集该序列、该分组所有相关文件路径
-            seq_group_files = []
-            # 加入真值文件
-            seq_group_files.append(gt_file)
-            # 加入当前分组下所有算法的文件
-            for _, alg_path_template, _, _ in alg_configs:
-                est_file = alg_path_template.format(seq, group_suffix)
-                # 兼容dpvo命名问题
-                seq_group_files.append(est_file)
-            
-            # 2. 读取所有有效文件的时间范围
-            time_ranges = []
-            for file in seq_group_files:
-                tr = get_trajectory_time_range(file)
-                if tr is not None:
-                    time_ranges.append(tr)
-                    # print(f"    有效文件: {os.path.basename(file)} | 时间范围: {tr[0]:.2f} ~ {tr[1]:.2f} s")
-                else:
-                    print(f"    无效文件: {os.path.basename(file)} | 跳过")
-            
-            if len(time_ranges) == 0:
-                print(f"  序列 {seq} - 分组 {group_name} 无有效文件，跳过")
-                continue
-            
-            # 3. 计算该分组全局统一时间范围
-            t_unified_start = max([tr[0] for tr in time_ranges])
-            t_unified_end = min([tr[1] for tr in time_ranges])
-            
-            if t_unified_start >= t_unified_end:
-                print(f"  序列 {seq} - 分组 {group_name} 无公共时间区间，跳过")
-                continue
-            
-            print(f"  序列 {seq} - 分组 {group_name} 统一时间范围: {t_unified_start:.2f} ~ {t_unified_end:.2f} s")
-            
-            # 4. 生成统一时间轴：以真值的时间戳为基准，裁剪到统一时间范围
-            t_gt_full, _, _ = read_tum_trajectory(gt_file)
-            if t_gt_full is None:
-                print(f"  序列 {seq} - 分组 {group_name} 真值文件读取失败，跳过")
-                continue
-                
-            mask_unified = (t_gt_full >= t_unified_start) & (t_gt_full <= t_unified_end)
-            t_unified = t_gt_full[mask_unified]
-            
-            if len(t_unified) < 2:
-                print(f"  序列 {seq} - 分组 {group_name} 统一时间轴点数不足，跳过")
-                continue
-            print(f"  序列 {seq} - 分组 {group_name} 统一时间戳点数: {len(t_unified)}")
-            
-            # 5. 计算该分组下所有算法在统一时间轴上的误差
-            group_error_data = {}
-            for alg_name, alg_path_template, color, linestyle in alg_configs:
-                est_file = alg_path_template.format(seq, group_suffix)
-                
-                error = get_angular_velocity_error_on_unified_t(gt_file, est_file, t_unified)
-                if error is not None:
-                    group_error_data[alg_name] = error
-                    print(f"    成功计算: {alg_name}")
-                else:
-                    print(f"    计算失败: {alg_name} | 跳过")
-            
-            # 保存该序列、该分组的数据
-            seq_data[seq][group_name] = {
-                "t_unified": t_unified,
-                "error_data": group_error_data
-            }
+def compute_rre(reference, estimate, max_time_diff=MAX_TIME_DIFF):
+    """Rotation-angle RPE in degrees for consecutive synchronized poses."""
+    ref_ids, est_ids = associate_timestamps(reference["t"], estimate["t"], max_time_diff)
+    if len(ref_ids) < 2:
+        raise ValueError(f"RRE requires two associated poses, found {len(ref_ids)}")
+    result = _pair_errors(reference, estimate, ref_ids[:-1], ref_ids[1:], est_ids[:-1], est_ids[1:])
+    result.update(timestamps=estimate["t"][est_ids[1:]], reference_ids=ref_ids)
+    return result
 
-    # ====================== 第二步：统一绘图 ======================
-    if len(seq_data) == 0:
-        print("无有效序列数据，无法绘图")
-        return
-    
-    # 创建画布：2行（分组） x 3列（序列）
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10), dpi=100)
-    
-    # 遍历分组和序列绘图
-    for row_idx, (group_name, _) in enumerate(group_configs):
-        for col_idx, seq in enumerate(sequences):
-            ax = axes[row_idx, col_idx]
-            
-            # 检查该序列该分组是否有数据
-            if seq not in seq_data or group_name not in seq_data[seq]:
-                ax.text(0.5, 0.5, "No Valid Data", ha='center', va='center', transform=ax.transAxes, fontname='Times New Roman')
-                ax.set_title(f"{group_name}_{seq}", fontname='Times New Roman', fontweight='bold')
-                ax.grid(True, alpha=0.3)
-                continue
-            
-            # 获取该分组特有的统一时间轴和误差数据
-            t_unified = seq_data[seq][group_name]["t_unified"]
-            error_data = seq_data[seq][group_name]["error_data"]
-            
-            # 用于存放当前子图的图例句柄和标签
-            current_legend_handles = []
-            current_legend_labels = []
-            
-            # 绘制每个算法的误差曲线
-            for alg_name, _, color, linestyle in alg_configs:
-                if alg_name not in error_data:
-                    # 如果数据不存在，添加一个空的占位符到图例中显示 failed
-                    fake_line = mlines.Line2D([], [], color='gray', linestyle='-', label=f"{alg_name}: failed")
-                    current_legend_handles.append(fake_line)
-                    current_legend_labels.append(f"{alg_name}: failed")
-                    continue
-                
-                error = error_data[alg_name]
-                line, = ax.plot(
-                    t_unified, error, 
-                    color=color, linestyle=linestyle, 
-                    linewidth=1.2, alpha=0.85
-                )
-                
-                # 计算均值
-                mean_err = np.mean(np.abs(error))
-                
-                # 将均值添加到图例标签中
-                legend_label = f"{alg_name}: {mean_err:.2f}"
-                current_legend_handles.append(line)
-                current_legend_labels.append(legend_label)
 
-            # 子图格式设置
-            ax.set_title(f"{group_name}_{seq}", fontsize=12, fontweight='bold', fontname='Times New Roman')
-            ax.set_xlabel("Time (s)", fontsize=10, fontname='Times New Roman', fontweight='bold')
-            ax.set_ylabel("Angular Velocity Error (deg/s)", fontsize=10, fontname='Times New Roman',fontweight='bold')
-            ax.grid(True, alpha=0.3, linestyle='--')
-            
-            # 在每个子图中添加独立图例
-            if current_legend_handles:
-                leg = ax.legend(
-                    current_legend_handles, 
-                    current_legend_labels,
-                    loc='upper right',
-                    fontsize=9,
-                    frameon=True,
-                    shadow=False,
-                    borderpad=0.5,
-                    labelspacing=0.3,
-                    handlelength=1.5,
-                    prop={'family': 'Times New Roman'} # 确保图例字体也是 Times New Roman
-                )
+def compute_adjacent_rre(reference, estimate, max_time_diff=MAX_TIME_DIFF):
+    """Score adjacent reference frames within the same tracking segment."""
+    ref_ids, est_ids = associate_timestamps(reference["t"], estimate["t"], max_time_diff)
+    valid = (np.diff(ref_ids) == 1) & (np.diff(est_ids) > 0)
+    if "segment_ids" in estimate:
+        segments = estimate["segment_ids"][est_ids]
+        valid &= (segments[:-1] == segments[1:]) & (segments[1:] > 0)
+    ends = ref_ids[1:][valid]
+    if not len(ends):
+        raise ValueError("No valid adjacent reference-frame pairs")
+    result = _pair_errors(reference, estimate, ends - 1, ends,
+                          est_ids[:-1][valid], est_ids[1:][valid])
+    result.update(timestamps=reference["t"][ends], pair_end_ids=ends, reference_ids=ref_ids)
+    return result
 
-    # 全局格式调整
-    plt.tight_layout(h_pad=2.0) 
 
-    # 修改点2: 保存高质量PNG图像
-    output_filename = "angular_velocity_error_comparison.png"
-    plt.savefig(
-        output_filename, 
-        dpi=300,          # 高分辨率 (300 DPI 是出版级标准，也可设为 600)
-        bbox_inches='tight', # 自动调整边界，防止标签被切掉
-        pad_inches=0.5    # 增加一点内边距
-    )
-    print(f"图像已保存至: {output_filename}")
+def shared_pair_errors(methods):
+    """Restrict each method to the intersection of its valid reference pairs."""
+    shared = set.intersection(*(set(method["pair_end_ids"]) for method in methods.values()))
+    if not shared:
+        raise ValueError("No adjacent reference-frame pairs shared by all methods")
+    ends = sorted(shared)
+    results = {}
+    for name, method in methods.items():
+        keep = np.isin(method["pair_end_ids"], ends)
+        errors = method["rre_deg"][keep]
+        results[name] = dict(method, rre_deg=errors, rmse_deg=float(np.sqrt(np.mean(errors ** 2))),
+                             timestamps=method["timestamps"][keep], pair_end_ids=method["pair_end_ids"][keep])
+    return results
 
-    plt.show()
+
+def compute_bell_overlap(reference, estimates, max_time_diff=MAX_TIME_DIFF):
+    """Evaluate the same adjacent reference-frame pairs for every Bell method."""
+    return shared_pair_errors({name: compute_adjacent_rre(reference, estimate, max_time_diff)
+                               for name, estimate in estimates.items()})
+
+
+def _load_segment_ids(path, timestamps, is_vpair):
+    time_key = "nominal_time_s" if is_vpair else "timestamp_s"
+    metadata_path = path.with_stem(f"{path.stem}_frames").with_suffix(".csv")
+    with metadata_path.open(newline="", encoding="utf-8-sig") as stream:
+        rows = [row for row in csv.DictReader(stream) if int(row["estimated"])]
+    times = [float(row[time_key]) for row in rows]
+    # TUM exports round timestamps to six decimal places.
+    if len(times) != len(timestamps) or not np.allclose(times, timestamps, rtol=0, atol=1e-6):
+        raise ValueError(f"{metadata_path}: estimated timestamps do not match {path.name}")
+    return np.asarray([int(row["segment_id"]) for row in rows])
+
+
+def failure_intervals(timestamps, valid):
+    """Return VPAIR time spans containing reference samples without ORB poses."""
+    times = np.asarray(timestamps, dtype=float)
+    valid = np.asarray(valid, dtype=bool)
+    if times.shape != valid.shape or not len(times):
+        raise ValueError("timestamps and valid must be nonempty arrays of equal length")
+    if len(times) > 1 and np.any(np.diff(times) <= 0):
+        raise ValueError("Failure-interval timestamps must be strictly increasing")
+    missing = np.flatnonzero(~valid)
+    if not len(missing):
+        return np.empty((0, 2), dtype=float)
+    runs = np.split(missing, np.flatnonzero(np.diff(missing) > 1) + 1)
+    intervals = []
+    for run in runs:
+        first, last = int(run[0]), int(run[-1])
+        start = times[first] if first == 0 else (times[first - 1] + times[first]) / 2
+        end = times[last] if last == len(times) - 1 else (times[last] + times[last + 1]) / 2
+        intervals.append((start, end))
+    return np.asarray(intervals, dtype=float)
+
+
+def mark_failure_intervals(axis, intervals, label="ORB-SLAM3 failed"):
+    for index, (start, end) in enumerate(intervals):
+        axis.axvspan(start, end, color="#e63946", alpha=.16,
+                     label=label if index == 0 else "_nolegend_", zorder=0)
+
+
+def _load_run(results_dir, sequence, title, suffix, max_time_diff, include_overwrite=False):
+    is_vpair = sequence == "vpair"
+    reference_path = (results_dir / "vpair_gt" / "vpair_gt.txt" if is_vpair else
+                      results_dir / "bell412_gt" / f"bell412_{sequence}_gt.txt")
+    reference = _load_tum(reference_path)
+    run = {"title": title, "times": reference["t"] - reference["t"][0], "algorithms": {}}
+    estimates = {}
+    styles = {}
+    methods = ROVO_ABLATION_METHODS + (OVERWRITE_METHOD,) if include_overwrite else METHODS
+    for method in methods:
+        name, folder, bell_filename, vpair_filename, color, linestyle = method
+        filename = vpair_filename if is_vpair else bell_filename.format(
+            sequence=sequence, suffix=suffix)
+        path = results_dir / folder / filename
+        if method == HYBRID_JOIN_METHOD and sequence == "5" and suffix == "_scale":
+            rerun = path.with_stem(f"{path.stem}_rerun")
+            if (not path.is_file() or path.stat().st_size == 0) and rerun.is_file():
+                path = rerun
+        estimate = _load_tum(path)
+        if folder == "rovo":
+            estimate["segment_ids"] = _load_segment_ids(path, estimate["t"], is_vpair)
+        estimates[name] = estimate
+        styles[name] = {"color": color, "linestyle": linestyle}
+    if is_vpair and not include_overwrite:
+        run["algorithms"] = {name: compute_adjacent_rre(reference, estimate, max_time_diff)
+                             for name, estimate in estimates.items()}
+        tracked = np.zeros(len(reference["t"]), dtype=bool)
+        tracked[run["algorithms"]["ORB-SLAM3"]["reference_ids"]] = True
+        run["failure_intervals"] = failure_intervals(run["times"], tracked)
+    else:
+        run["algorithms"] = compute_bell_overlap(reference, estimates, max_time_diff)
+    for name, style in styles.items():
+        run["algorithms"][name].update(style)
+    run["time_origin"] = reference["t"][0]
+    return run
+
+
+def _plot_rre(axis, run):
+    for name, method in run["algorithms"].items():
+        times = method["timestamps"] - run["time_origin"]
+        errors = method["rre_deg"]
+        if "pair_end_ids" in method:
+            gaps = np.flatnonzero(np.diff(method["pair_end_ids"]) != 1) + 1
+            times = np.insert(times, gaps, np.nan)
+            errors = np.insert(errors, gaps, np.nan)
+        axis.plot(times, errors,
+                  color=method["color"], linestyle=method["linestyle"], linewidth=.9,
+                  label=f"{name}: RMSE {method['rmse_deg']:.2f} deg")
+    axis.set_ylabel("RRE (deg)")
+
+
+@plt.rc_context({"font.family": "Times New Roman", "font.size": 14,
+                 "axes.titlesize": 14, "figure.titlesize": 14, "legend.fontsize": 10,
+                 "axes.titleweight": "bold", "figure.titleweight": "bold"})
+def plot_comparison_figures(bell_runs, vpair_run, output_dir):
+    """Save exactly one figure for each requested rotation curve."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figure = plt.figure(figsize=(16, 10))
+    grid = figure.add_gridspec(3, 3, height_ratios=(1, 1, 1.1), hspace=.35, wspace=.25)
+    for index, run in enumerate(bell_runs):
+        axis = figure.add_subplot(grid[index // 3, index % 3])
+        axis.set_title(run["title"])
+        _plot_rre(axis, run)
+        axis.set_xlabel("Time from reference start (s)")
+        axis.grid(True, alpha=.25, linestyle="--")
+        axis.legend(loc="best")
+    axis = figure.add_subplot(grid[2, :])
+    axis.set_title("VPAIR")
+    if "failure_intervals" in vpair_run:
+        mark_failure_intervals(axis, vpair_run["failure_intervals"])
+    _plot_rre(axis, vpair_run)
+    axis.set_xlabel("Time from first image (s, 1 Hz)")
+    axis.set_xlim(vpair_run["times"][0], vpair_run["times"][-1])
+    axis.grid(True, alpha=.25, linestyle="--")
+    axis.legend(loc="best", ncol=2)
+    figure.suptitle("Relative Rotation Error")
+    figure.subplots_adjust(left=.07, right=.99, bottom=.07, top=.92,
+                           hspace=.38, wspace=.28)
+    path = output_dir / "comparison_rre.png"
+    figure.savefig(path, dpi=500, bbox_inches="tight")
+    return [figure], [path]
+
+
+def run_comparison(results_dir=RESULTS_DIR, output_dir=None,
+                   sequences=SEQUENCES, groups=GROUPS,
+                   max_time_diff=MAX_TIME_DIFF, include_overwrite=False):
+    results_dir = Path(results_dir)
+    bell_runs = []
+    for group_name, suffix in groups:
+        for sequence in sequences:
+            bell_runs.append(_load_run(results_dir, sequence, f"{group_name}_{sequence}",
+                                       suffix, max_time_diff, include_overwrite))
+    vpair_run = _load_run(results_dir, "vpair", "VPAIR", "", max_time_diff,
+                          include_overwrite)
+    if output_dir is None:
+        output_dir = OUTPUT_DIR.parent / "ablation" if include_overwrite else OUTPUT_DIR
+    figures, paths = plot_comparison_figures(bell_runs, vpair_run, output_dir)
+    return bell_runs, vpair_run, figures, paths
+
+
+def write_metrics(path, bell_runs, vpair_run, include_overwrite):
+    """Write the scores and tracking coverage used in the flight tables."""
+    comparisons = [(run, "shared", run["algorithms"]) for run in bell_runs]
+    methods = vpair_run["algorithms"]
+    if include_overwrite:
+        comparisons.append((vpair_run, "shared", methods))
+    else:
+        comparisons.extend([
+            (vpair_run, "own", methods),
+            (vpair_run, "shared", shared_pair_errors(methods)),
+            (vpair_run, "shared_dpvo_rovo", shared_pair_errors(
+                {name: methods[name] for name in ("DPVO", HYBRID_JOIN_METHOD[0])})),
+        ])
+
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(["sequence", "pair_set", "method", "reference_frames",
+                         "tracked_frames", "coverage_percent", "valid_pairs", "rmse_deg"])
+        for run, pair_set, methods in comparisons:
+            reference_count = len(run["times"])
+            for name, method in methods.items():
+                tracked = len(np.unique(method["reference_ids"]))
+                pairs = len(method["rre_deg"])
+                rmse = method["rmse_deg"]
+                writer.writerow([run["title"], pair_set, name, reference_count, tracked,
+                                 f"{100 * tracked / reference_count:.6f}", pairs, f"{rmse:.6f}"])
+                print(f"{run['title']} ({pair_set}) {name}: {pairs} pairs, RMSE {rmse:.6f} deg")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-show", action="store_true", help="Save plots without opening windows")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--max-time-diff", type=float, default=MAX_TIME_DIFF)
+    parser.add_argument("--ablation", "--include-overwrite", dest="ablation", action="store_true",
+                        help="Compare the four ROVO variants on shared reference pairs")
+    options = parser.parse_args(argv)
+    if options.max_time_diff < 0 or not np.isfinite(options.max_time_diff):
+        parser.error("--max-time-diff must be finite and nonnegative")
+    if options.no_show:
+        plt.switch_backend("Agg")
+
+    bell_runs, vpair_run, figures, paths = run_comparison(
+        output_dir=options.output_dir, max_time_diff=options.max_time_diff,
+        include_overwrite=options.ablation)
+    metrics_path = paths[0].with_name("metrics.csv")
+    write_metrics(metrics_path, bell_runs, vpair_run, options.ablation)
+    for path in [*paths, metrics_path]:
+        print(f"Saved {path.resolve()}")
+    if not options.no_show:
+        plt.show()
+    for figure in figures:
+        plt.close(figure)
+    return bell_runs, vpair_run
+
 
 if __name__ == "__main__":
     main()

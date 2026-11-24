@@ -1,0 +1,29 @@
+sequence,pair_set,method,reference_frames,tracked_frames,coverage_percent,valid_pairs,rmse_deg
+Bell412_3,shared,ROVO (5-point),1541,881,57.170668,880,0.511394
+Bell412_3,shared,ROVO (Eigensolver),1541,881,57.170668,880,0.610696
+Bell412_3,shared,ROVO (Hybrid Join),1541,881,57.170668,880,0.510942
+Bell412_3,shared,ROVO (Hybrid Join Overwrite),1541,881,57.170668,880,0.513724
+Bell412_4,shared,ROVO (5-point),1596,1571,98.433584,1570,0.444543
+Bell412_4,shared,ROVO (Eigensolver),1596,1571,98.433584,1570,1.084244
+Bell412_4,shared,ROVO (Hybrid Join),1596,1571,98.433584,1570,0.444368
+Bell412_4,shared,ROVO (Hybrid Join Overwrite),1596,1571,98.433584,1570,0.453574
+Bell412_5,shared,ROVO (5-point),2417,1386,57.343815,1385,0.683136
+Bell412_5,shared,ROVO (Eigensolver),2417,1386,57.343815,1385,0.892364
+Bell412_5,shared,ROVO (Hybrid Join),2417,1386,57.343815,1385,0.686963
+Bell412_5,shared,ROVO (Hybrid Join Overwrite),2417,1386,57.343815,1385,0.704358
+3x Scaled Bell412_3,shared,ROVO (5-point),1541,601,39.000649,600,0.873518
+3x Scaled Bell412_3,shared,ROVO (Eigensolver),1541,601,39.000649,600,1.059225
+3x Scaled Bell412_3,shared,ROVO (Hybrid Join),1541,601,39.000649,600,0.918267
+3x Scaled Bell412_3,shared,ROVO (Hybrid Join Overwrite),1541,601,39.000649,600,1.068119
+3x Scaled Bell412_4,shared,ROVO (5-point),1596,771,48.308271,770,0.632080
+3x Scaled Bell412_4,shared,ROVO (Eigensolver),1596,771,48.308271,770,0.901777
+3x Scaled Bell412_4,shared,ROVO (Hybrid Join),1596,771,48.308271,770,0.652488
+3x Scaled Bell412_4,shared,ROVO (Hybrid Join Overwrite),1596,771,48.308271,770,0.803339
+3x Scaled Bell412_5,shared,ROVO (5-point),2417,281,11.625983,280,0.804016
+3x Scaled Bell412_5,shared,ROVO (Eigensolver),2417,281,11.625983,280,0.827593
+3x Scaled Bell412_5,shared,ROVO (Hybrid Join),2417,281,11.625983,280,0.779609
+3x Scaled Bell412_5,shared,ROVO (Hybrid Join Overwrite),2417,281,11.625983,280,0.822966
+VPAIR,shared,ROVO (5-point),2706,2679,99.002217,2667,3.792540
+VPAIR,shared,ROVO (Eigensolver),2706,2679,99.002217,2667,3.923154
+VPAIR,shared,ROVO (Hybrid Join),2706,2681,99.076127,2667,3.766506
+VPAIR,shared,ROVO (Hybrid Join Overwrite),2706,2685,99.223947,2667,3.788378
